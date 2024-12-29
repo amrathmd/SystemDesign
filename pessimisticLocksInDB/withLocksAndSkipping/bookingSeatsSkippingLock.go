@@ -8,47 +8,50 @@ import (
 )
 
 func Book(db *sql.DB, userId, showId int) error {
+    tx, err := db.Begin()
+    if err != nil {
+        return fmt.Errorf("failed to start transaction: %v", err)
+    }
+    defer func(tx *sql.Tx) {
+        if p := recover(); p != nil {
+            tx.Rollback()
+            panic(p)
+        } else if err != nil {
+            tx.Rollback()
+        } else {
+            err = tx.Commit()
+        }
+    }(tx)
+
+    // Modified query to avoid the JOIN and use EXISTS instead
     var seat common.Seat
-    // Check for available seats before booking
-	tx,err := db.Begin();
-	if err != nil {
-		return fmt.Errorf("failed to start transaction: %v", err)
-	}
-	defer func(tx *sql.Tx){
-		if p := recover(); p != nil{
-			tx.Rollback()
-			panic(p)
-		}else if err != nil{
-			tx.Rollback()
-		}else {
-			tx.Commit()
-		}
-	}(tx)
     err = tx.QueryRow(`
-        SELECT s.seatId, s.seatNumber
-        FROM seats s
-        LEFT JOIN bookings b ON s.seatId = b.seatId
-        WHERE b.bookingId IS NULL AND s.showId = ?
-        LIMIT 1 for update skip locked`, showId).Scan(&seat.SeatId, &seat.SeatNumber)
-	
-    // If no available seats, return an error
+        SELECT s.seatId, s.seatNumber 
+        FROM seats s 
+        WHERE s.showId = ? 
+        AND NOT EXISTS (
+            SELECT 1 FROM bookings b 
+            WHERE b.seatId = s.seatId
+        )
+        LIMIT 1 
+        FOR UPDATE SKIP LOCKED`, showId).Scan(&seat.SeatId, &seat.SeatNumber)
+
     if err != nil {
         if err == sql.ErrNoRows {
             return fmt.Errorf("no available seats for showId %d", showId)
         }
-        log.Println("Error getting seats:", err)
-        return err
+        return fmt.Errorf("error getting seats: %v", err)
     }
 
     // Insert booking for the selected seat
-    queryToBook := `INSERT INTO bookings(userId, showId, seatId) VALUES(?, ?, ?)`
-    _, err = tx.Exec(queryToBook, userId, showId, seat.SeatId)
+    _, err = tx.Exec(`
+        INSERT INTO bookings(userId, showId, seatId) 
+        VALUES(?, ?, ?)`, userId, showId, seat.SeatId)
     if err != nil {
-        log.Println("Error booking seat:", err)
-        return err
+        return fmt.Errorf("error booking seat: %v", err)
     }
 
-    log.Printf("Booked seat %d for user %d on showId %d", seat.SeatId, userId, showId)
+    log.Printf("Booked seat %s for user %d on showId %d", seat.SeatNumber, userId, showId)
     return nil
 }
 
@@ -64,5 +67,5 @@ func CheckBookedSeats(db *sql.DB,showId int){
 		seatsBooked = append(seatsBooked, seat)
 	}
 	fmt.Println("Booked seats:")
-	log.Printf("%d",seatsBooked);
+	log.Printf("%d : length = %d",seatsBooked,len(seatsBooked));
 }
